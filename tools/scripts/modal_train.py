@@ -6,6 +6,14 @@ from pathlib import Path
 
 import modal
 
+# ### Repository Pointer
+# This demo relies on (slightly) modified version of DSVT.
+dsvt_repository = "https://github.com/ben-modal/DSVT-modal.git"
+branch_name = "modal-train"
+# After that change merged into the main repo, this can point to the regular DSVT.
+# dsvt_repository = https://github.com/beijbom/DSVT.git
+# Get the short name of the repo
+dsvt = dsvt_repository.split("/")[-1].split(".")[0]
 
 # ### NuScenes Dataset Setup
 # To automatically download and setup the v1.0-mini subset of NuScenes you need to make an account here:
@@ -44,7 +52,7 @@ nuscenes_image = (
     )
     .apt_install(["git", "python3-opencv", "build-essential", "ninja-build", "clang"])
     .run_commands("pip install --upgrade pip")
-    .pip_install(["uv"])
+    .pip_install("uv")
     .run_commands(
         "uv pip install --system --index-strategy unsafe-best-match "
         "'numpy==1.23.5' 'scikit-image<=0.21.0' "
@@ -64,8 +72,8 @@ nuscenes_image = (
     # version of the repo using Modal's `add_local_dir`:
     # https://modal.com/docs/guide/images#add-local-files-with-add_local_dir-and-add_local_file
     #
-    .run_commands("git clone https://github.com/beijbom/DSVT.git")
-    .run_commands("uv pip install --system --no-build-isolation -e DSVT")
+    .run_commands(f"git clone -b {branch_name} --single-branch {dsvt_repository}")
+    .run_commands(f"uv pip install --system --no-build-isolation -e {dsvt}")
     .run_commands("uv pip install --system 'mmcv>=1.4.0,<2.0.0'")
     # NOTE: it might be possible to use DSVT's internally copied subset of pcdet,
     # which would save time as this takes a while:
@@ -247,6 +255,8 @@ def download_nuscenes(
     max_containers=1,
 )
 class DSVTTrainer:
+    n_gpus: int = modal.parameter(default=0)
+
     @modal.method()
     def default_nuscenes_config_setup(
         self,
@@ -264,15 +274,15 @@ class DSVTTrainer:
         Inputs:
             tag: string added to modified configs
             data_ver: string specifying the NuScenes dataset subset version
-            model_name: name of a YAML file in DSVT/tools/cfgs/dsvt_models
-            data_name: name of a YAML file in DSVT/tools/cfgs/dataset_configs
+            model_name: name of a YAML file in f"{dsvt}/tools/cfgs/dsvt_models"
+            data_name: name of a YAML file in f"{dsvt}/tools/cfgs/dataset_configs"
             config_save_dir: place to save the custom configs
         """
         # Data catalogs
         from yaml import safe_dump, safe_load
 
         # Directories
-        tools = Path("/DSVT") / "tools"
+        tools = Path(f"/{dsvt}") / "tools"
         model_configs = tools / "cfgs/dsvt_models"
         data_configs = tools / "cfgs/dataset_configs"
 
@@ -350,8 +360,6 @@ class DSVTTrainer:
         """
         import os
 
-        import torch
-
         # Prepare inputs
         flags = " ".join([f"--{arg}={val}" for arg, val in params.items()])
         cmd = (
@@ -360,15 +368,19 @@ class DSVTTrainer:
             "--nnodes=1 "
             "--rdzv-backend=c10d "
             "--rdzv-endpoint=localhost:0 "
-            f"--nproc_per_node={torch.cuda.device_count()} "
-            f"/DSVT/tools/train.py --launcher none "
+            f"--nproc_per_node={self.n_gpus} "  # one process per GPU
+            f"/{dsvt}/tools/train.py --launcher pytorch "
             f"--cfg_file {model_config_path} " + flags
         )
         if exp_name:
             print(f"Running exp {exp_name} with command:\n\t{cmd}")
 
         # Execute
-        os.chdir("/DSVT/tools")
+        os.chdir(f"/{dsvt}/tools")
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+            [str(x) for x in range(self.n_gpus)]
+        )
+
         os.system(cmd)
 
 
@@ -403,7 +415,7 @@ def main(gpu: str = "A100", n_gpus: int = 2, data_ver: str = "v1.0-mini"):
         print("Dataset pickles found, skipping download etc.")
 
     # (1) Data identified! Create the trainer.
-    trainer = DSVTTrainer.with_options(gpu=f"{gpu}:{n_gpus}")()
+    trainer = DSVTTrainer.with_options(gpu=f"{gpu}:{n_gpus}")(n_gpus=n_gpus)
 
     # Replace this with your custom config setup:
     exp_name = "multi-gpu-demo"
@@ -412,6 +424,6 @@ def main(gpu: str = "A100", n_gpus: int = 2, data_ver: str = "v1.0-mini"):
         data_ver=data_ver,
         config_save_dir=config_cache_subdir,
     )
-    params = {"epochs": 1, "batch_size": 2}
+    params = {"epochs": 1}
     # Call train.py (spawns one container)
     trainer.train.remote(exp_name=exp_name, model_config_path=exp_config, params=params)
