@@ -1,31 +1,37 @@
-# # Training DSVT on NuScenes with Modal
+# # Training DSVT on NuScenes v1.0-mini with Modal
 
 # ## Setup
 
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import modal
 
 
 # ### NuScenes Dataset Setup
-# In this demo we are only setting up the `v1.0-mini` version of the dataset.
-# To download NuScenes you need to make an account here: https://www.nuscenes.org/sign-up?prevpath=nuscenes&prevhash=download
-# Then upload your username and password as a [Modal Secret](https://modal.com/secrets/). Click the Custom secret
-# button, name the secret `nuscenes`, then enter two key/value pairs: [NUSCENES_USERNAME, NUSCENES_PASSWORD].
-# Then the following line will import these values as environment variables:
+# To automatically download and setup the v1.0-mini subset of NuScenes you need to make an account here:
+#       https://www.nuscenes.org/nuscenes#download
+# Then upload your username and password as a [Modal Secret](https://modal.com/secrets/):
+# 1) Click the Custom secret button,
+# 2) name the secret `nuscenes`,
+# 3) then enter two key/value pairs: {NUSCENES_USERNAME: your_email, NUSCENES_PASSWORD: your_password}.
+#
+# Then, the following line will import these values as environment variables:
 nuscenes_secret = modal.Secret.from_name("nuscenes")
 
-# We will download the data into a Modal.Volume with this name:
+# We'll download the data into a Modal.Volume with this name:
 vol_name = "example-nuscenes2"
-# This is the location within the container where this Volume will be mounted:
+# This is the relative location within the container where this Volume will be mounted:
 vol_mnt = Path("/data")
 vol_data_subdir = "nuscenes"  # data subdir within the volume
-nuscenes_posix = (vol_mnt / vol_data_subdir).as_posix()
+config_cache_subdir = "model-checkpoints"  # you can save whatever you want in there
 
-# Create (or ID) the Volume object:
+
+# Initialize the the Volume object (creating one if you haven't already):
 nuscenes_volume = modal.Volume.from_name(vol_name, create_if_missing=True)
 
 # ### Define the image
+# Here we build all the necessary libraries to run DSVT and OpenPCDet.
+# It's somewhat nuanced, with specialized versions of numpy etc., so beware of fiddling.
 nuscenes_image = (
     modal.Image.from_registry("nvidia/cuda:11.8.0-devel-ubuntu20.04", add_python="3.9")
     .env(
@@ -42,6 +48,7 @@ nuscenes_image = (
     .run_commands(
         "uv pip install --system --index-strategy unsafe-best-match "
         "'numpy==1.23.5' 'scikit-image<=0.21.0' "
+        # Doesn't have to be this version of Torch, but need to commit to a version and stay consistent.
         "'torch==2.0.1+cu118' 'torchvision==0.15.2+cu118' 'torchaudio==2.0.2+cu118' "
         "--index-url https://download.pytorch.org/whl/cu118 "
         "--extra-index-url https://pypi.org/simple"
@@ -53,13 +60,15 @@ nuscenes_image = (
     .run_commands(
         "uv pip install --system tensorrt onnx pyyaml 'nuscenes-devkit==1.0.5'"
     )
-    # NOTE: You could instead import from local with add_local_dir:
+    # Here we clone some repos and build them. NOTE: you could instead import your a local
+    # version of the repo using Modal's `add_local_dir`:
     # https://modal.com/docs/guide/images#add-local-files-with-add_local_dir-and-add_local_file
     #
     .run_commands("git clone https://github.com/beijbom/DSVT.git")
     .run_commands("uv pip install --system --no-build-isolation -e DSVT")
     .run_commands("uv pip install --system 'mmcv>=1.4.0,<2.0.0'")
-    # NOTE: might be possible to use DSVT's internal copy of pcdet?
+    # NOTE: it might be possible to use DSVT's internally copied subset of pcdet,
+    # which would save time as this takes a while:
     .run_commands("git clone https://github.com/open-mmlab/OpenPCDet.git")
     .run_commands("uv pip install --system --no-build-isolation -e OpenPCDet")
     .run_commands("uv pip install --system 'av2==0.2.0' 'kornia<0.7'")
@@ -73,29 +82,36 @@ app = modal.App(
     volumes={vol_mnt: nuscenes_volume},
 )
 
+
 # ## NuScenes Automated Downloading + Preprocessing
-# This function automagically downloads and preprocesses the NuScenes dataset.
-# Tested with the v1.0-mini partition only -- the massive v1.0-train will take a
-# long time (you may want to make a different Modal Volume for each subset).
-
-
-# We cap max_containers with 1 here, but you could distribute the download
+# The function `download_nuscenes` automatically downloads and preprocesses the NuScenes dataset.
+# Tested with the v1.0-mini partition only -- the massive v1.0-train dataset may need special
+# handling (for example, distributing across several Modal Volumes).
+# NOTE: we cap max_containers with 1 here, but you could distribute the download
 # and preprocessing over subsets of v1.0-train and v1.0-test.
+# NOTE: it's unclear whether a GPU is necessary for preprocessing, but `mmcv` throws a lot
+# of warnings if one is not available.
 @app.function(
     image=nuscenes_image,
     secrets=[nuscenes_secret],
     volumes={vol_mnt: nuscenes_volume},
-    timeout=3 * 60 * 60,  # processing v1.0-mini takes 0.5-1.5 hours
-    gpu="A10G",
+    timeout=60 * 60,  # preprocessing v1.0-mini from scratch takes 30-60min
+    gpu="T4",
     max_containers=1,
 )
 def download_nuscenes(
     volume_subdir: str,
     region: str = "us",  # or "asia"
-    dataset_version: str = "v1.0-mini",
+    dataset_version: str = "v1.0-mini",  # only tested with v1.0-mini
 ):
     """
-    Automated download inspired by:
+    Inputs:
+        - volume_subdir: subdir within the volume where all this data should be downloaded/extracted
+        - region: 'us' or 'asia'
+        - dataset_version: string identifying which subset of the NuScenes dataset to download, see
+            https://www.nuscenes.org/nuscenes#download
+
+    Automated download code inspired by:
     https://github.com/li-xl/nuscenes-download/blob/master/download_nuscenes.py
     """
     import json
@@ -216,7 +232,14 @@ def download_nuscenes(
     print(f"\tNuScenes {dataset_version} is ready in: {extract_dir}")
 
 
-# Train:
+# ## Trainer application
+# This class encapsulates the call to `train.py`. It could easily be collapsed into a simpler function,
+# but we set it up as a class to demonstrate the `with_options` constructor decorator (see function below),
+# which allows us to dynamically configure GPU type and count.
+#
+# The `train` method is the important one: this constructs and executes a call to train.py.
+# The `default_nuscenes_config_setup` shows how to programmatically modify the model and data
+# config so as to point at the data volume and each other.
 @app.cls(
     image=nuscenes_image,
     volumes={vol_mnt: nuscenes_volume},
@@ -233,6 +256,18 @@ class DSVTTrainer:
         data_name: str = "nuscenes_dataset",
         config_save_dir="saved-configs",
     ):
+        """
+        This function loads template model/data configs and modifies them to point at the data
+        we created in the Modal Volume. This is meant as a placeholder depending on how
+        you want to create and save configs.
+
+        Inputs:
+            tag: string added to modified configs
+            data_ver: string specifying the NuScenes dataset subset version
+            model_name: name of a YAML file in DSVT/tools/cfgs/dsvt_models
+            data_name: name of a YAML file in DSVT/tools/cfgs/dataset_configs
+            config_save_dir: place to save the custom configs
+        """
         # Data catalogs
         from yaml import safe_dump, safe_load
 
@@ -279,6 +314,7 @@ class DSVTTrainer:
 
         ########################################################
         # (2) Edit model config
+
         with open(template_model_path, "r") as f:
             model_config = safe_load(f)
         model_config["DATA_CONFIG"]["DATA_AUGMENTOR"]["AUG_CONFIG_LIST"][0][
@@ -300,10 +336,17 @@ class DSVTTrainer:
     @modal.method()
     def train(
         self,
-        exp_name: str,
         model_config_path: str,
+        exp_name: str = "",
         params: dict = {},
     ):
+        """
+        Method that creates a command for executing train.py.
+        Inputs:
+            model_config_path: path to a config file (mandatory input to train.py)
+            exp_name: optional tag for printing
+            params: dict of flags passed on to train.py
+        """
         import os
 
         import torch
@@ -318,16 +361,16 @@ class DSVTTrainer:
         )
         if exp_name:
             print(f"Running exp {exp_name} with command:\n\t{cmd}")
+
+        # Execute
         os.chdir("/DSVT/tools")
         os.system(cmd)
 
 
 @app.local_entrypoint()
-def main():
-    # Add as CLI:
+def main(gpu: str = "A100", data_ver: str = "v1.0-mini"):
+    # TODO: add n_gpus
     n_gpus = 1
-    gpu = "A100"
-    data_ver = "v1.0-mini"
 
     # (0) Check for data before firing up the downloader/preprocessor container
     # Check if the necessary pickle files exist:
@@ -337,7 +380,6 @@ def main():
         "nuscenes_dbinfos_10sweeps_withvelo.pkl",
     ]
 
-    # TODO: better way to check if subdir exists?
     run_downloader = False
     try:
         paths = [
@@ -345,24 +387,27 @@ def main():
             for x in nuscenes_volume.listdir(f"{vol_data_subdir}/{data_ver}")
             if x.path.endswith("pkl")
         ]
+
+        for p in pickles:
+            if p not in paths:
+                run_downloader = True
     except Exception as err:
         # Error if listdir called on non-existent vol
         run_downloader = True
-
-    for p in pickles:
-        if p not in paths:
-            run_downloader = True
 
     if run_downloader:
         download_nuscenes.remote(vol_data_subdir)
     else:
         print("Dataset pickles found, skipping download etc.")
 
-    # (1) Data identified! Call trainer.
+    # (1) Data identified! Create the trainer.
     trainer = DSVTTrainer.with_options(gpu=f"{gpu}:{n_gpus}")()
+
     # Replace this with your custom config setup:
     exp_name = "single-gpu-demo"
     exp_config = trainer.default_nuscenes_config_setup.remote(
         tag=exp_name, data_ver=data_ver
     )
+
+    # Call train.py (spawns one container)
     trainer.train.remote(exp_name=exp_name, model_config_path=exp_config, params={})
