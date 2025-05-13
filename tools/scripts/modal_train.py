@@ -19,7 +19,7 @@ import modal
 nuscenes_secret = modal.Secret.from_name("nuscenes")
 
 # We'll download the data into a Modal.Volume with this name:
-vol_name = "example-nuscenes2"
+vol_name = "example-nuscenes"
 # This is the relative location within the container where this Volume will be mounted:
 vol_mnt = Path("/data")
 vol_data_subdir = "nuscenes"  # data subdir within the volume
@@ -327,9 +327,10 @@ class DSVTTrainer:
             safe_dump(model_config, f)
 
         print(
-            f"Using configs:"
-            f"\n\tmodel: {output_model_path} (exists: {output_data_path.is_file()})"
-            f"\n\tdata: {output_data_path} (exist: {output_data_path.is_file()})"
+            f"Using modified version of configs:"
+            f"\n\tmodel: {template_model_path}"
+            f"\n\tdata: {template_data_path}"
+            f"See modified versions at: {savedir}"
         )
         return output_model_path.as_posix()
 
@@ -352,7 +353,7 @@ class DSVTTrainer:
         import torch
 
         # Prepare inputs
-        flags = " ".join([f"--{arg} {val}" for arg, val in params.items()])
+        flags = " ".join([f"--{arg}={val}" for arg, val in params.items()])
         cmd = (
             f"torchrun "
             f"--nproc_per_node={torch.cuda.device_count()} "
@@ -369,7 +370,7 @@ class DSVTTrainer:
 
 @app.local_entrypoint()
 def main(gpu: str = "A100", data_ver: str = "v1.0-mini"):
-    # TODO: add n_gpus
+    # TODO: currently getting OOM if n_gpus > 1
     n_gpus = 1
 
     # (0) Check for data before firing up the downloader/preprocessor container
@@ -408,6 +409,6 @@ def main(gpu: str = "A100", data_ver: str = "v1.0-mini"):
     exp_config = trainer.default_nuscenes_config_setup.remote(
         tag=exp_name, data_ver=data_ver
     )
-
+    params = {"epochs": 1, "local_rank": n_gpus}
     # Call train.py (spawns one container)
-    trainer.train.remote(exp_name=exp_name, model_config_path=exp_config, params={})
+    trainer.train.remote(exp_name=exp_name, model_config_path=exp_config, params=params)
