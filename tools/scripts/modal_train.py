@@ -2,7 +2,7 @@
 
 # ## Setup
 
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import modal
 
@@ -62,7 +62,11 @@ nuscenes_image = (
     # NOTE: might be possible to use DSVT's internal copy of pcdet?
     .run_commands("git clone https://github.com/open-mmlab/OpenPCDet.git")
     .run_commands("uv pip install --system --no-build-isolation -e OpenPCDet")
-    .run_commands("uv pip install --system 'av2==0.2.0' 'kornia<0.7'")
+    .run_commands(
+        "uv pip install --system --no-build-isolation "
+        "'av2==0.2.0' 'kornia<0.7'"
+        " -U 'ray[data,train,tune,serve]'"
+    )
     .entrypoint([])
 )
 
@@ -181,7 +185,7 @@ def download_nuscenes(
         print(f"\tExtracting to {extract_dir}")
         with tarfile.open(tgz_file, "r:gz") as tar:
             for member in tqdm(tar.getmembers(), desc="Extracting", unit="file"):
-                tar.extract(member, path=extract_dir)  # NOW extract
+                tar.extract(member, path=extract_dir)
         print("\tExtraction complete")
     else:
         print(
@@ -195,10 +199,10 @@ def download_nuscenes(
         extract_dir / f"{info_prefix}_infos_10sweeps_val.pkl",
     ]
     if all([x.is_file() for x in pickles]):
-        print("\tpickle files found!")
+        print("\tPickle files found!")
     else:
         print("\tGenerating devkit metadata pickles...")
-        os.chdir("/OpenPCDet")  # TODO: try using DSVT's copy inside its repo..
+        os.chdir("/OpenPCDet")  # TODO: try using DSVT/pcdet copy inside its repo..
         cmd = [
             sys.executable,
             "-m",
@@ -321,9 +325,15 @@ class DSVTTrainer:
         os.chdir("/DSVT/tools")
         os.system(cmd)
 
+        # TODO: get metric from results and pass back
+        return 23
 
+
+# # Demo scripts
+# ## If you don't specify otherwise, this function will run
+# `modal run modal_train.py`
 @app.local_entrypoint()
-def main():
+def single_train_demo():
     # Add as CLI:
     n_gpus = 1
     gpu = "A100"
@@ -366,3 +376,57 @@ def main():
         tag=exp_name, data_ver=data_ver
     )
     trainer.train.remote(exp_name=exp_name, model_config_path=exp_config, params={})
+
+
+@app.function(image=nuscenes_image, volumes={vol_mnt: nuscenes_volume})
+def hp_sweep_driver(gpu: str = "A100", n_gpus: int = 1):
+    # ## Hyperparameter tune with RayTune
+    # sweep_driver.py
+    import ray
+    from ray import tune
+    from pathlib import Path
+
+    ray.init()  # start Ray on the host
+
+    # ------------------------------------------------------------------
+    # Ray trial ⇒ spin up a Modal container, wait for result, report
+    # ------------------------------------------------------------------
+    def ray_trainable(cfg):
+        exp_id = tune.get_trial_id()  # unique tag per trial
+        trainer = DSVTTrainer.with_options(gpu=f"{gpu}:{n_gpus}")()()
+
+        # 1) create data+model configs
+        model_cfg = trainer.default_nuscenes_config_setup.remote(
+            tag=exp_id,
+            data_ver="v1.0-mini",
+        )
+
+        # 2) launch training with hyper-params coming from Ray
+        result_f = trainer.train.remote(
+            exp_name=exp_id,
+            model_config_path=model_cfg,
+            params={
+                "lr": cfg["lr"],
+                "batch_size": cfg["batch_size"],
+                "epochs": 10,
+            },
+        )
+
+        metrics = result_f.get()  # wait for container to finish
+        tune.report(score=metrics["val_mAP"])
+
+    # ------------------------------------------------------------------
+    # Search-space and sweep spec
+    # ------------------------------------------------------------------
+    search_space = {
+        "lr": tune.loguniform(1e-5, 1e-3),
+        "batch_size": tune.choice([4, 6, 8]),
+    }
+
+    tune.run(
+        ray_trainable,
+        name="dsvt_sweep",
+        config=search_space,
+        num_samples=20,  # ← total budget N
+        max_concurrent_trials=4,  # ← at most M containers live
+    )
