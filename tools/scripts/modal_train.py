@@ -12,6 +12,7 @@ dsvt_repository = "https://github.com/ben-modal/DSVT-modal.git"
 branch_name = "modal-train"
 # After that change merged into the main repo, this can point to the regular DSVT.
 # dsvt_repository = https://github.com/beijbom/DSVT.git
+# branch_name = "master"
 # Get the short name of the repo
 dsvt = dsvt_repository.split("/")[-1].split(".")[0]
 
@@ -80,6 +81,9 @@ nuscenes_image = (
     .run_commands("git clone https://github.com/open-mmlab/OpenPCDet.git")
     .run_commands("uv pip install --system --no-build-isolation -e OpenPCDet")
     .run_commands("uv pip install --system 'av2==0.2.0' 'kornia<0.7'")
+    .run_commands(
+        f"mkdir -p /OpenPCDet/data && ln -s {(vol_mnt / vol_data_subdir).as_posix()} /OpenPCDet/data/nuscenes"
+    )
     .entrypoint([])
 )
 
@@ -104,7 +108,7 @@ app = modal.App(
     secrets=[nuscenes_secret],
     volumes={vol_mnt: nuscenes_volume},
     timeout=60 * 60,  # preprocessing v1.0-mini from scratch takes 30-60min
-    gpu="T4",
+    gpu="A10G",
     max_containers=1,
 )
 def download_nuscenes(
@@ -205,7 +209,7 @@ def download_nuscenes(
         print(f"\tExtracting to {extract_dir}")
         with tarfile.open(tgz_file, "r:gz") as tar:
             for member in tqdm(tar.getmembers(), desc="Extracting", unit="file"):
-                tar.extract(member, path=extract_dir)  # NOW extract
+                tar.extract(member, path=extract_dir)
         print("\tExtraction complete")
     else:
         print(
@@ -222,7 +226,7 @@ def download_nuscenes(
         print("\tpickle files found!")
     else:
         print("\tGenerating devkit metadata pickles...")
-        os.chdir("/OpenPCDet")  # TODO: try using DSVT's copy inside its repo..
+        os.chdir("/OpenPCDet")
         cmd = [
             sys.executable,
             "-m",
@@ -301,7 +305,8 @@ class DSVTTrainer:
         train_data = data_dir / "nuscenes_infos_10sweeps_train.pkl"
         val_data = data_dir / "nuscenes_infos_10sweeps_val.pkl"
         velo_data = data_dir / "nuscenes_dbinfos_10sweeps_withvelo.pkl"
-
+        if not (train_data.is_file() and val_data.is_file() and velo_data.is_file()):
+            raise ValueError(f"data was not found at: {data_dir}")
         ########################################################
         # (1) Edit the data config
 
@@ -410,7 +415,9 @@ def main(gpu: str = "A100", n_gpus: int = 2, data_ver: str = "v1.0-mini"):
         run_downloader = True
 
     if run_downloader:
-        download_nuscenes.remote(vol_data_subdir)
+        download_nuscenes.remote(
+            volume_subdir=vol_data_subdir, region="us", dataset_version="v1.0-mini"
+        )
     else:
         print("Dataset pickles found, skipping download etc.")
 
