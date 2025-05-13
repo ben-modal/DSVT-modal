@@ -23,7 +23,7 @@ vol_name = "example-nuscenes"
 # This is the relative location within the container where this Volume will be mounted:
 vol_mnt = Path("/data")
 vol_data_subdir = "nuscenes"  # data subdir within the volume
-config_cache_subdir = "model-checkpoints"  # you can save whatever you want in there
+config_cache_subdir = "config-backups"  # you can save whatever you want in there
 
 
 # Initialize the the Volume object (creating one if you haven't already):
@@ -407,7 +407,9 @@ def main(gpu: str = "A100", data_ver: str = "v1.0-mini"):
     # Replace this with your custom config setup:
     exp_name = "single-gpu-demo"
     exp_config = trainer.default_nuscenes_config_setup.remote(
-        tag=exp_name, data_ver=data_ver
+        tag=exp_name,
+        data_ver=data_ver,
+        config_save_dir=config_cache_subdir,
     )
     params = {"epochs": 1, "local_rank": n_gpus}
     # Call train.py (spawns one container)
