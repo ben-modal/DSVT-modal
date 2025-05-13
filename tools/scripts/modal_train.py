@@ -356,6 +356,9 @@ class DSVTTrainer:
         flags = " ".join([f"--{arg}={val}" for arg, val in params.items()])
         cmd = (
             f"torchrun "
+            "--nnodes=1 "
+            "--rdzv-backend=c10d "
+            "--rdzv-endpoint=localhost:0 "
             f"--nproc_per_node={torch.cuda.device_count()} "
             f"/DSVT/tools/train.py --launcher none "
             f"--cfg_file {model_config_path} " + flags
@@ -369,10 +372,7 @@ class DSVTTrainer:
 
 
 @app.local_entrypoint()
-def main(gpu: str = "A100", data_ver: str = "v1.0-mini"):
-    # TODO: currently getting OOM if n_gpus > 1
-    n_gpus = 1
-
+def main(n_gpus: int = 2, gpu: str = "A100", data_ver: str = "v1.0-mini"):
     # (0) Check for data before firing up the downloader/preprocessor container
     # Check if the necessary pickle files exist:
     pickles = [
@@ -411,6 +411,6 @@ def main(gpu: str = "A100", data_ver: str = "v1.0-mini"):
         data_ver=data_ver,
         config_save_dir=config_cache_subdir,
     )
-    params = {"epochs": 1, "local_rank": n_gpus}
+    params = {"epochs": 1}
     # Call train.py (spawns one container)
     trainer.train.remote(exp_name=exp_name, model_config_path=exp_config, params=params)
