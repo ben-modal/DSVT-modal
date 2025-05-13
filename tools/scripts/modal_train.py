@@ -330,7 +330,7 @@ class DSVTTrainer:
             f"Using modified version of configs:"
             f"\n\tmodel: {template_model_path}"
             f"\n\tdata: {template_data_path}"
-            f"See modified versions at: {savedir}"
+            f"\nSee modified versions at: {savedir}"
         )
         return output_model_path.as_posix()
 
@@ -356,6 +356,7 @@ class DSVTTrainer:
         flags = " ".join([f"--{arg}={val}" for arg, val in params.items()])
         cmd = (
             f"torchrun "
+            "--standalone "
             "--nnodes=1 "
             "--rdzv-backend=c10d "
             "--rdzv-endpoint=localhost:0 "
@@ -372,7 +373,7 @@ class DSVTTrainer:
 
 
 @app.local_entrypoint()
-def main(n_gpus: int = 2, gpu: str = "A100", data_ver: str = "v1.0-mini"):
+def main(gpu: str = "A100", n_gpus: int = 2, data_ver: str = "v1.0-mini"):
     # (0) Check for data before firing up the downloader/preprocessor container
     # Check if the necessary pickle files exist:
     pickles = [
@@ -392,8 +393,8 @@ def main(n_gpus: int = 2, gpu: str = "A100", data_ver: str = "v1.0-mini"):
         for p in pickles:
             if p not in paths:
                 run_downloader = True
-    except Exception as err:
-        # Error if listdir called on non-existent vol
+    except Exception:
+        # If the dir does not exist in the volume, it will error out to here
         run_downloader = True
 
     if run_downloader:
@@ -405,12 +406,12 @@ def main(n_gpus: int = 2, gpu: str = "A100", data_ver: str = "v1.0-mini"):
     trainer = DSVTTrainer.with_options(gpu=f"{gpu}:{n_gpus}")()
 
     # Replace this with your custom config setup:
-    exp_name = "single-gpu-demo"
+    exp_name = "multi-gpu-demo"
     exp_config = trainer.default_nuscenes_config_setup.remote(
         tag=exp_name,
         data_ver=data_ver,
         config_save_dir=config_cache_subdir,
     )
-    params = {"epochs": 1}
+    params = {"epochs": 1, "batch_size": 2}
     # Call train.py (spawns one container)
     trainer.train.remote(exp_name=exp_name, model_config_path=exp_config, params=params)
