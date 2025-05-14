@@ -240,7 +240,7 @@ def download_nuscenes(
             "--with_cam",
         ]
         subprocess.run(cmd, check=True)
-
+    nuscenes_volume.commit()
     print(f"\tNuScenes {dataset_version} is ready in: {extract_dir}")
 
 
@@ -284,6 +284,9 @@ class DSVTTrainer:
         """
         # Data catalogs
         from yaml import safe_dump, safe_load
+
+        # Refresh volume:
+        nuscenes_volume.reload()
 
         # Directories
         tools = Path(f"/{dsvt}") / "tools"
