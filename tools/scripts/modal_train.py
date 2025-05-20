@@ -257,6 +257,7 @@ def download_nuscenes(
     volumes={vol_mnt: nuscenes_volume},
     timeout=24 * 60 * 60,
     max_containers=1,
+    cloud="aws",
 )
 class DSVTTrainer:
     n_gpus: int = modal.parameter(default=0)
